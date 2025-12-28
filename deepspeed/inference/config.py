@@ -8,7 +8,7 @@ import deepspeed
 from pydantic import Field, field_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
-from typing import Dict, Union, Optional
+from typing import Dict, Union, Optional, List
 from enum import Enum
 
 
@@ -142,6 +142,21 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
     Use this flag for capturing the CUDA-Graph of the inference ops, so that it
     can run faster using the graph replay method.
+    """
+
+    cuda_graph_batch_sizes: Optional[List[int]] = None
+    """
+    List of batch sizes to create CUDA graphs for. If None, creates a single graph
+    for the first batch size encountered. If specified, creates multiple graphs
+    for each batch size, enabling efficient handling of variable batch sizes.
+    
+    Example:
+        config = {
+            "enable_cuda_graph": True,
+            "cuda_graph_batch_sizes": [1, 2, 4, 8, 16],  # Creates graphs for these batch sizes
+        }
+        model = deepspeed.init_inference(model, config=config)
+        # Model automatically selects the appropriate graph based on input batch size
     """
 
     use_triton: bool = False

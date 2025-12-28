@@ -87,6 +87,8 @@ class InferenceEngine(Module):
         self.expert_mp_group = None  # config.moe.ep_mp_group
 
         self.cuda_graph_created = False
+        self.cuda_graphs = {}  # Dict[batch_size, (graph, static_inputs, static_kwargs, static_output)]
+        self.cuda_graph_pool = None  # Memory pool for CUDA graphs
         self.checkpoint_engine = TorchCheckpointEngine()
         quantization_setting = None
         self._init_quantization_setting(
@@ -107,6 +109,9 @@ class InferenceEngine(Module):
         if get_accelerator().device_name() == 'cuda' and config.enable_cuda_graph:
             assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
                 "If you want to use cuda graph, please upgrade torch to at least v1.10"
+            if config.cuda_graph_batch_sizes is not None:
+                # Sort batch sizes in descending order so largest creates memory pool first
+                config.cuda_graph_batch_sizes = sorted(config.cuda_graph_batch_sizes, reverse=True)
 
         # convert model to intended dtype
         if config.dtype:
@@ -493,8 +498,21 @@ class InferenceEngine(Module):
         elif config.dtype == torch.float:
             self.module.float()
 
-    def _create_cuda_graph(self, *inputs, **kwargs):
-        # warmup to create the workspace and cublas handle
+    def _get_batch_size(self, *inputs, **kwargs):
+        """Extract batch size from inputs."""
+        # Try to get batch size from input_ids (common for transformers)
+        if "input_ids" in kwargs and torch.is_tensor(kwargs["input_ids"]):
+            return kwargs["input_ids"].shape[0]
+        # Try first input tensor
+        for inp in inputs:
+            if torch.is_tensor(inp) and inp.dim() > 0:
+                return inp.shape[0]
+        # Default to 1 if can't determine
+        return 1
+
+    def _create_cuda_graph(self, batch_size, *inputs, **kwargs):
+        """Create CUDA graph for a specific batch size."""
+        # Warmup to create the workspace and cublas handle
         cuda_stream = get_accelerator().Stream()
         cuda_stream.wait_stream(get_accelerator().current_stream())
         with get_accelerator().stream(cuda_stream):
@@ -502,25 +520,47 @@ class InferenceEngine(Module):
                 ret = self.module(*inputs, **kwargs)
         get_accelerator().current_stream().wait_stream(cuda_stream)
 
-        # create cuda_graph and assign static_inputs and static_outputs
-        self._cuda_graphs = get_accelerator().create_graph()
-        self.static_inputs = inputs
-        self.static_kwargs = kwargs
+        # Create CUDA graph with memory pool reuse
+        graph = get_accelerator().create_graph()
+        static_inputs = inputs
+        static_kwargs = kwargs
 
-        with get_accelerator().capture_to_graph(self._cuda_graphs):
-            self.static_output = self.module(*self.static_inputs, **self.static_kwargs)
+        # Use memory pool if available (from largest batch size)
+        pool = self.cuda_graph_pool
+        stream = None
+        with get_accelerator().capture_to_graph(graph, pool=pool, stream=stream):
+            static_output = self.module(*static_inputs, **static_kwargs)
 
+        # Extract memory pool from first graph (largest batch size)
+        # PyTorch CUDAGraph.pool() returns the memory pool
+        if self.cuda_graph_pool is None and hasattr(graph, 'pool'):
+            try:
+                self.cuda_graph_pool = graph.pool()
+            except AttributeError:
+                self.cuda_graph_pool = None
+
+        # Store graph and static tensors
+        self.cuda_graphs[batch_size] = (graph, static_inputs, static_kwargs, static_output)
         self.cuda_graph_created = True
 
-    def _graph_replay(self, *inputs, **kwargs):
+    def _graph_replay(self, batch_size, *inputs, **kwargs):
+        """Replay CUDA graph for a specific batch size."""
+        if batch_size not in self.cuda_graphs:
+            raise ValueError(f"CUDA graph for batch size {batch_size} not found. "
+                           f"Available batch sizes: {list(self.cuda_graphs.keys())}")
+
+        graph, static_inputs, static_kwargs, static_output = self.cuda_graphs[batch_size]
+
+        # Copy inputs to static tensors
         for i in range(len(inputs)):
-            if torch.is_tensor(inputs[i]):
-                self.static_inputs[i].copy_(inputs[i])
+            if torch.is_tensor(inputs[i]) and torch.is_tensor(static_inputs[i]):
+                static_inputs[i].copy_(inputs[i])
         for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[k].copy_(kwargs[k])
-        get_accelerator().replay_graph(self._cuda_graphs)
-        return self.static_output
+            if torch.is_tensor(kwargs[k]) and k in static_kwargs and torch.is_tensor(static_kwargs[k]):
+                static_kwargs[k].copy_(kwargs[k])
+
+        get_accelerator().replay_graph(graph)
+        return static_output
 
     def model_times(self):
         assert self.model_profile_enabled, "model profiling is not enabled"
@@ -566,11 +606,28 @@ class InferenceEngine(Module):
             start = time.time()
 
         if get_accelerator().device_name() == 'cuda' and self._config.enable_cuda_graph and not self.local_cuda_graph:
-            if self.cuda_graph_created:
-                outputs = self._graph_replay(*inputs, **kwargs)
+            batch_size = self._get_batch_size(*inputs, **kwargs)
+            
+            # Check if we need to create graphs for multiple batch sizes
+            if self._config.cuda_graph_batch_sizes is not None:
+                # Multi-graph mode: create graphs for specified batch sizes
+                if batch_size not in self.cuda_graphs:
+                    if batch_size in self._config.cuda_graph_batch_sizes:
+                        self._create_cuda_graph(batch_size, *inputs, **kwargs)
+                    else:
+                        # Fallback to direct execution if batch size not in list
+                        outputs = self.module(*inputs, **kwargs)
+                        return outputs
+                outputs = self._graph_replay(batch_size, *inputs, **kwargs)
             else:
-                self._create_cuda_graph(*inputs, **kwargs)
-                outputs = self._graph_replay(*inputs, **kwargs)
+                # Single graph mode: backward compatible behavior
+                if self.cuda_graph_created:
+                    # Use first available graph (backward compatibility)
+                    first_bs = next(iter(self.cuda_graphs.keys()))
+                    outputs = self._graph_replay(first_bs, *inputs, **kwargs)
+                else:
+                    self._create_cuda_graph(batch_size, *inputs, **kwargs)
+                    outputs = self._graph_replay(batch_size, *inputs, **kwargs)
 
         else:
             outputs = self.module(*inputs, **kwargs)
