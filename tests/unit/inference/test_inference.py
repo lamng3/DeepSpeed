@@ -813,6 +813,30 @@ class TestMultipleCudaGraphs(DistributedTest):
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
         from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
+        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
+
+        # Monkey-patch to avoid non-graphable operations during CUDA graph capture
+        # The original function calls torch.all() which can't be captured in CUDA graphs
+        original_prepare = _prepare_4d_attention_mask_for_sdpa
+
+        def graphable_prepare(mask, dtype, tgt_len=None):
+            # Simplified version that avoids torch.all() call during graph capture
+            # Just reshape and convert dtype without the conditional check
+            if mask.dim() == 3:
+                batch_size, seq_len, _ = mask.shape
+                mask = mask.view(batch_size, seq_len, 1, 1)
+            elif mask.dim() == 2:
+                batch_size, seq_len = mask.shape
+                mask = mask.view(batch_size, 1, 1, seq_len)
+            # Ensure 4D shape
+            while mask.dim() < 4:
+                mask = mask.unsqueeze(-1)
+            return mask.to(dtype=dtype)
+
+        # Temporarily replace the function
+        import transformers.modeling_attn_mask_utils
+        transformers.modeling_attn_mask_utils._prepare_4d_attention_mask_for_sdpa = graphable_prepare
+
         model_config = AutoConfig.from_pretrained(model)
         if hasattr(model_config, 'attn_implementation'):
             model_config.attn_implementation = "eager"
@@ -825,6 +849,15 @@ class TestMultipleCudaGraphs(DistributedTest):
         pipe.device = device
         pipe.model.to(device)
 
+        # Patch BERT model to use eager attention (disable SDPA) for CUDA graph compatibility
+        # BERT models may not respect attn_implementation config, so we patch directly
+        if hasattr(pipe.model, 'bert'):
+            for layer in pipe.model.bert.encoder.layer:
+                if hasattr(layer.attention.self, '_use_sdpa'):
+                    layer.attention.self._use_sdpa = False
+                if hasattr(layer.attention.self, 'use_sdpa'):
+                    layer.attention.self.use_sdpa = False
+
         # Initialize with multiple batch sizes
         config = {
             'mp_size': 1,
@@ -834,6 +867,14 @@ class TestMultipleCudaGraphs(DistributedTest):
             'cuda_graph_batch_sizes': [1, 2, 4],
         }
         pipe.model = deepspeed.init_inference(pipe.model, **config)
+
+        # Re-apply patch after DeepSpeed init (it might reset the model)
+        if hasattr(pipe.model.module, 'bert'):
+            for layer in pipe.model.module.bert.encoder.layer:
+                if hasattr(layer.attention.self, '_use_sdpa'):
+                    layer.attention.self._use_sdpa = False
+                if hasattr(layer.attention.self, 'use_sdpa'):
+                    layer.attention.self.use_sdpa = False
 
         # Verify graphs are created for each batch size
         query = {"question": "What is the capital of France?", "context": "Paris is the capital of France."}
@@ -893,6 +934,30 @@ class TestMultipleCudaGraphs(DistributedTest):
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
         from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
+        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
+
+        # Monkey-patch to avoid non-graphable operations during CUDA graph capture
+        # The original function calls torch.all() which can't be captured in CUDA graphs
+        original_prepare = _prepare_4d_attention_mask_for_sdpa
+
+        def graphable_prepare(mask, dtype, tgt_len=None):
+            # Simplified version that avoids torch.all() call during graph capture
+            # Just reshape and convert dtype without the conditional check
+            if mask.dim() == 3:
+                batch_size, seq_len, _ = mask.shape
+                mask = mask.view(batch_size, seq_len, 1, 1)
+            elif mask.dim() == 2:
+                batch_size, seq_len = mask.shape
+                mask = mask.view(batch_size, 1, 1, seq_len)
+            # Ensure 4D shape
+            while mask.dim() < 4:
+                mask = mask.unsqueeze(-1)
+            return mask.to(dtype=dtype)
+
+        # Temporarily replace the function
+        import transformers.modeling_attn_mask_utils
+        transformers.modeling_attn_mask_utils._prepare_4d_attention_mask_for_sdpa = graphable_prepare
+
         model_config = AutoConfig.from_pretrained(model)
         if hasattr(model_config, 'attn_implementation'):
             model_config.attn_implementation = "eager"
@@ -949,6 +1014,30 @@ class TestMultipleCudaGraphs(DistributedTest):
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
         from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
+        from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa
+
+        # Monkey-patch to avoid non-graphable operations during CUDA graph capture
+        # The original function calls torch.all() which can't be captured in CUDA graphs
+        original_prepare = _prepare_4d_attention_mask_for_sdpa
+
+        def graphable_prepare(mask, dtype, tgt_len=None):
+            # Simplified version that avoids torch.all() call during graph capture
+            # Just reshape and convert dtype without the conditional check
+            if mask.dim() == 3:
+                batch_size, seq_len, _ = mask.shape
+                mask = mask.view(batch_size, seq_len, 1, 1)
+            elif mask.dim() == 2:
+                batch_size, seq_len = mask.shape
+                mask = mask.view(batch_size, 1, 1, seq_len)
+            # Ensure 4D shape
+            while mask.dim() < 4:
+                mask = mask.unsqueeze(-1)
+            return mask.to(dtype=dtype)
+
+        # Temporarily replace the function
+        import transformers.modeling_attn_mask_utils
+        transformers.modeling_attn_mask_utils._prepare_4d_attention_mask_for_sdpa = graphable_prepare
+
         model_config = AutoConfig.from_pretrained(model)
         if hasattr(model_config, 'attn_implementation'):
             model_config.attn_implementation = "eager"
