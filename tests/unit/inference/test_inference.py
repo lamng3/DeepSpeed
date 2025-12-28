@@ -812,13 +812,14 @@ class TestMultipleCudaGraphs(DistributedTest):
 
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
-        from transformers import AutoModelForQuestionAnswering, AutoConfig
+        from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
         model_config = AutoConfig.from_pretrained(model)
         if hasattr(model_config, 'attn_implementation'):
             model_config.attn_implementation = "eager"
         model_obj = AutoModelForQuestionAnswering.from_pretrained(model, config=model_config)
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
-        pipe = pipeline(task, model=model_obj, device=torch.device("cpu"), framework="pt")
+        pipe = pipeline(task, model=model_obj, tokenizer=tokenizer, device=torch.device("cpu"), framework="pt")
         pipe.model.half()
         pipe.model.eval()  # Ensure model is in eval mode for CUDA graph capture
         pipe.device = device
@@ -891,13 +892,14 @@ class TestMultipleCudaGraphs(DistributedTest):
 
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
-        from transformers import AutoModelForQuestionAnswering, AutoConfig
+        from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
         model_config = AutoConfig.from_pretrained(model)
         if hasattr(model_config, 'attn_implementation'):
             model_config.attn_implementation = "eager"
         model_obj = AutoModelForQuestionAnswering.from_pretrained(model, config=model_config)
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
-        pipe = pipeline(task, model=model_obj, device=torch.device("cpu"), framework="pt")
+        pipe = pipeline(task, model=model_obj, tokenizer=tokenizer, device=torch.device("cpu"), framework="pt")
         pipe.model.half()
         pipe.model.eval()  # Ensure model is in eval mode for CUDA graph capture
         pipe.device = device
@@ -946,13 +948,14 @@ class TestMultipleCudaGraphs(DistributedTest):
 
         # Load model with eager attention to avoid non-graphable SDPA operations
         # Must set attn_implementation in config BEFORE model creation
-        from transformers import AutoModelForQuestionAnswering, AutoConfig
-        config = AutoConfig.from_pretrained(model)
-        if hasattr(config, 'attn_implementation'):
-            config.attn_implementation = "eager"
-        model_obj = AutoModelForQuestionAnswering.from_pretrained(model, config=config)
+        from transformers import AutoModelForQuestionAnswering, AutoConfig, AutoTokenizer
+        model_config = AutoConfig.from_pretrained(model)
+        if hasattr(model_config, 'attn_implementation'):
+            model_config.attn_implementation = "eager"
+        model_obj = AutoModelForQuestionAnswering.from_pretrained(model, config=model_config)
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
-        pipe = pipeline(task, model=model_obj, device=torch.device("cpu"), framework="pt")
+        pipe = pipeline(task, model=model_obj, tokenizer=tokenizer, device=torch.device("cpu"), framework="pt")
         pipe.model.half()
         pipe.model.eval()  # Ensure model is in eval mode for CUDA graph capture
         pipe.device = device
