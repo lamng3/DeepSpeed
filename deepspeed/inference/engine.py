@@ -547,7 +547,7 @@ class InferenceEngine(Module):
         """Replay CUDA graph for a specific batch size."""
         if batch_size not in self.cuda_graphs:
             raise ValueError(f"CUDA graph for batch size {batch_size} not found. "
-                           f"Available batch sizes: {list(self.cuda_graphs.keys())}")
+                             f"Available batch sizes: {list(self.cuda_graphs.keys())}")
 
         graph, static_inputs, static_kwargs, static_output = self.cuda_graphs[batch_size]
 
@@ -607,7 +607,7 @@ class InferenceEngine(Module):
 
         if get_accelerator().device_name() == 'cuda' and self._config.enable_cuda_graph and not self.local_cuda_graph:
             batch_size = self._get_batch_size(*inputs, **kwargs)
-            
+
             # Check if we need to create graphs for multiple batch sizes
             if self._config.cuda_graph_batch_sizes is not None:
                 # Multi-graph mode: create graphs for specified batch sizes

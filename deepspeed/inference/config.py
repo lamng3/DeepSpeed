@@ -149,7 +149,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     List of batch sizes to create CUDA graphs for. If None, creates a single graph
     for the first batch size encountered. If specified, creates multiple graphs
     for each batch size, enabling efficient handling of variable batch sizes.
-    
+
     Example:
         config = {
             "enable_cuda_graph": True,

@@ -787,3 +787,156 @@ class TestLMCorrectness(DistributedTest):
         ppl_diff = abs(bs_output["results"][task]["ppl"] - ds_output["results"][task]["ppl"])
         #assert ds_time <= bs_time
         assert ppl_diff < 0.01
+
+
+@pytest.mark.inference
+class TestMultipleCudaGraphs(DistributedTest):
+    world_size = 1
+
+    def test_multiple_cuda_graphs(self):
+        """Test that multiple CUDA graphs are created and used correctly for different batch sizes."""
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip("CUDA not available")
+
+        if pkg_version.parse(torch.__version__) < pkg_version.parse("1.10"):
+            pytest.skip("CUDA Graph requires torch >= 1.10")
+
+        if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
+            pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
+
+        # Use a small BERT model (CUDA graphs are supported for BERT/RoBERTa models)
+        model = "google-bert/bert-base-uncased"
+        task = "question-answering"
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(get_accelerator().device_name(local_rank))
+
+        # Load model
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
+        pipe.model.half()
+        pipe.device = device
+        pipe.model.to(device)
+
+        # Initialize with multiple batch sizes
+        config = {
+            'mp_size': 1,
+            'dtype': torch.half,
+            'replace_with_kernel_inject': True,
+            'enable_cuda_graph': True,
+            'cuda_graph_batch_sizes': [1, 2, 4],
+        }
+        pipe.model = deepspeed.init_inference(pipe.model, **config)
+
+        # Verify graphs are created for each batch size
+        query = {"question": "What is the capital of France?", "context": "Paris is the capital of France."}
+
+        # Test batch size 1
+        with torch.no_grad():
+            output1 = pipe([query])
+        assert 1 in pipe.model.cuda_graphs, "Graph for batch size 1 should be created"
+
+        # Test batch size 2
+        with torch.no_grad():
+            output2 = pipe([query, query])
+        assert 2 in pipe.model.cuda_graphs, "Graph for batch size 2 should be created"
+
+        # Test batch size 4
+        with torch.no_grad():
+            output4 = pipe([query] * 4)
+        assert 4 in pipe.model.cuda_graphs, "Graph for batch size 4 should be created"
+
+        # Verify all graphs were created
+        assert len(pipe.model.cuda_graphs) == 3, f"Expected 3 graphs, got {len(pipe.model.cuda_graphs)}"
+
+        # Test that replay works (second call should use the graph)
+        with torch.no_grad():
+            output1_replay = pipe([query])
+            output2_replay = pipe([query, query])
+            output4_replay = pipe([query] * 4)
+
+        # Outputs should be consistent
+        assert output1[0]['answer'] == output1_replay[0]['answer'], "Graph replay should produce same results"
+
+    def test_multiple_cuda_graphs_fallback(self):
+        """Test that batch sizes not in the list fall back to direct execution."""
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip("CUDA not available")
+
+        if pkg_version.parse(torch.__version__) < pkg_version.parse("1.10"):
+            pytest.skip("CUDA Graph requires torch >= 1.10")
+
+        if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
+            pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
+
+        model = "google-bert/bert-base-uncased"
+        task = "question-answering"
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(get_accelerator().device_name(local_rank))
+
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
+        pipe.model.half()
+        pipe.device = device
+        pipe.model.to(device)
+
+        config = {
+            'mp_size': 1,
+            'dtype': torch.half,
+            'replace_with_kernel_inject': True,
+            'enable_cuda_graph': True,
+            'cuda_graph_batch_sizes': [1, 2, 4],
+        }
+        pipe.model = deepspeed.init_inference(pipe.model, **config)
+
+        query = {"question": "What is the capital of France?", "context": "Paris is the capital of France."}
+
+        # Test batch size 3 (not in the list) - should fall back to direct execution
+        with torch.no_grad():
+            output3 = pipe([query] * 3)
+        assert 3 not in pipe.model.cuda_graphs, "Batch size 3 should not create a graph"
+        assert output3 is not None, "Direct execution should work"
+
+    def test_single_cuda_graph_backward_compat(self):
+        """Test that single graph mode still works when cuda_graph_batch_sizes is None."""
+        if get_accelerator().device_name() != 'cuda':
+            pytest.skip("CUDA not available")
+
+        if pkg_version.parse(torch.__version__) < pkg_version.parse("1.10"):
+            pytest.skip("CUDA Graph requires torch >= 1.10")
+
+        if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
+            pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
+
+        model = "google-bert/bert-base-uncased"
+        task = "question-answering"
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(get_accelerator().device_name(local_rank))
+
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
+        pipe.model.half()
+        pipe.device = device
+        pipe.model.to(device)
+
+        # Test backward compatibility - no cuda_graph_batch_sizes specified
+        config = {
+            'mp_size': 1,
+            'dtype': torch.half,
+            'replace_with_kernel_inject': True,
+            'enable_cuda_graph': True,
+            # cuda_graph_batch_sizes not specified - should use single graph mode
+        }
+        pipe.model = deepspeed.init_inference(pipe.model, **config)
+
+        query = {"question": "What is the capital of France?", "context": "Paris is the capital of France."}
+
+        # First call creates the graph
+        with torch.no_grad():
+            output1 = pipe([query])
+
+        # Should have created a graph (backward compatible behavior)
+        assert pipe.model.cuda_graph_created, "Single graph should be created"
+        assert len(pipe.model.cuda_graphs) > 0, "At least one graph should exist"
+
+        # Second call should use the graph
+        with torch.no_grad():
+            output2 = pipe([query])
+
+        assert output1[0]['answer'] == output2[0]['answer'], "Graph replay should work"
